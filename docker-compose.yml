@@ -1,0 +1,92 @@
+# ══════════════════════════════════════════════
+# docker-compose.yml – Çoklu Servis Orkestrasyonu
+# ══════════════════════════════════════════════
+# Başlat: docker-compose up --build
+# GPU ile: docker-compose --profile gpu up
+# ══════════════════════════════════════════════
+
+version: "3.9"
+
+services:
+
+  # ────────────────────────────────────────────
+  # API SUNUCUSU (FastAPI)
+  # ────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-music-api
+    command: python main.py api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./uploads:/app/uploads     # Dosyalar host ile paylaşılır
+      - model-cache:/root/.cache   # Model dosyaları saklanır (yeniden indirme önlenir)
+    environment:
+      - USE_GPU=true
+      - TTS_MODEL=tts_models/multilingual/multi-dataset/xtts_v2
+      - MUSIC_MODEL=facebook/musicgen-small
+      - API_PORT=8000
+      - PYTHONIOENCODING=utf-8
+      - LANG=tr_TR.UTF-8
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  # ────────────────────────────────────────────
+  # WEB ARAYÜZÜ (Streamlit)
+  # ────────────────────────────────────────────
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-music-ui
+    command: >
+      streamlit run app.py
+      --server.port 8501
+      --server.headless true
+      --server.fileWatcherType none
+      --server.maxUploadSize 100
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./uploads:/app/uploads
+      - model-cache:/root/.cache
+    environment:
+      - API_BASE_URL=http://api:8000
+      - PYTHONIOENCODING=utf-8
+      - LANG=tr_TR.UTF-8
+    depends_on:
+      api:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+# ──────────────────────────────────────────────
+# KALICI DEPOLAMA
+# ──────────────────────────────────────────────
+volumes:
+  model-cache:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./model_cache   # Host'ta sakla
