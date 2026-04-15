@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
 """
 Reklam Spotu Üreticisi
-Türkçe metin → ses sentezi → otomatik müzik mix → reklam spotu
+Türkçe metin → Gemini TTS → otomatik müzik mix → reklam spotu
 """
 
 import io
+import re
 import time
+import wave as wavemodule
+import base64
 import numpy as np
-import pandas as pd
-import scipy.io.wavfile as wav
+import scipy.io.wavfile as spwav
 import streamlit as st
 
 st.set_page_config(
@@ -22,43 +24,28 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
 * { font-family: 'Inter', sans-serif; }
-
-.header {
-    text-align: center;
-    padding: 2.5rem 1rem 1.5rem;
-}
+.header { text-align: center; padding: 2.5rem 1rem 1.5rem; }
 .header h1 { font-size: 2rem; font-weight: 700; margin: 0; }
 .header p  { color: #888; margin: .4rem 0 0; font-size: 1rem; }
-
-.result-box {
-    background: #111827;
-    border: 1px solid #1f2937;
-    border-radius: 12px;
-    padding: 1.2rem 1.5rem;
-    margin-bottom: 1rem;
-}
 .result-label {
-    font-size: .75rem;
-    font-weight: 600;
-    color: #6C63FF;
-    text-transform: uppercase;
-    letter-spacing: .08em;
-    margin-bottom: .5rem;
+    font-size: .75rem; font-weight: 600; color: #6C63FF;
+    text-transform: uppercase; letter-spacing: .08em; margin-bottom: .5rem;
 }
 .tone-pill {
     display: inline-block;
-    background: #6C63FF22;
-    color: #6C63FF;
+    background: #6C63FF22; color: #6C63FF;
     border: 1px solid #6C63FF55;
-    border-radius: 20px;
-    padding: 2px 12px;
-    font-size: .8rem;
-    font-weight: 600;
+    border-radius: 20px; padding: 2px 12px;
+    font-size: .8rem; font-weight: 600;
+}
+.api-box {
+    background: #1a1a2e; border: 1px solid #6C63FF44;
+    border-radius: 12px; padding: 1.2rem 1.5rem; margin: 1rem 0;
 }
 </style>
 """, unsafe_allow_html=True)
 
-# ── SABIT VERİLER ─────────────────────────────────────────────────────────────
+# ── SABITLER ─────────────────────────────────────────────────────────────────
 TONE_KEYWORDS = {
     "enerjik" : ["hızlı","dinamik","enerji","harika","heyecan","şimdi","bugün","fırsat","kampanya","indirim","acele"],
     "kurumsal": ["güvenilir","profesyonel","kalite","lider","deneyim","çözüm","hizmet","teknoloji","sistem","güç"],
@@ -75,14 +62,6 @@ TONE_LABELS = {
     "lüks"    : "💎 Lüks",
 }
 
-TONE_FREQ = {
-    "enerjik" : 280,
-    "kurumsal": 180,
-    "dramatik": 130,
-    "samimi"  : 220,
-    "lüks"    : 160,
-}
-
 TONE_CHORDS = {
     "enerjik" : [261, 329, 392, 523],
     "kurumsal": [220, 277, 330, 440],
@@ -91,64 +70,82 @@ TONE_CHORDS = {
     "lüks"    : [277, 349, 415, 554],
 }
 
+GEMINI_VOICES = ["Aoede", "Charon", "Fenrir", "Kore", "Puck"]
+
 # ── YARDIMCI FONKSİYONLAR ────────────────────────────────────────────────────
 
 def detect_tone(text: str) -> tuple[str, int]:
-    """Metinden ton tespiti. (ton, güven%) döndürür."""
     tl = text.lower()
     scores = {t: sum(1 for kw in kws if kw in tl) for t, kws in TONE_KEYWORDS.items()}
     best  = max(scores, key=scores.get)
     total = sum(scores.values()) or 1
-    conf  = int(scores[best] / total * 100) if total else 0
-    return best, conf
+    return best, int(scores[best] / total * 100)
 
 
-def make_voice(text: str, tone: str, speed: float) -> bytes:
-    """TTS simülasyonu — sine wave ile ses üretir."""
-    sr       = 22050
-    freq     = TONE_FREQ.get(tone, 200)
-    duration = max(2.0, len(text.split()) * 0.45 / speed)
-    t        = np.linspace(0, duration, int(sr * duration))
+def make_voice_gemini(text: str, api_key: str, voice: str = "Aoede") -> bytes:
+    """Gemini 2.0 Flash TTS ile Türkçe ses üretir."""
+    import google.generativeai as genai
 
-    wave  = np.sin(2 * np.pi * freq * t)
-    wave += 0.3  * np.sin(2 * np.pi * freq * 2 * t)
-    wave += 0.15 * np.sin(2 * np.pi * freq * 3 * t)
+    genai.configure(api_key=api_key)
 
-    fade = int(sr * 0.15)
-    env  = np.ones_like(t)
-    env[:fade]  = np.linspace(0, 1, fade)
-    env[-fade:] = np.linspace(1, 0, fade)
-    wave *= env * 0.6
+    prompt = (
+        "Aşağıdaki Türkçe reklam metnini profesyonel, akıcı ve doğal bir "
+        "seslendirme tonu ile oku. Sadece metni oku, ek yorum ekleme.\n\n"
+        f"{text}"
+    )
 
-    buf = io.BytesIO()
-    wav.write(buf, sr, (wave * 32767).astype(np.int16))
+    response = genai.GenerativeModel("gemini-2.0-flash-exp").generate_content(
+        contents=prompt,
+        generation_config={
+            "response_modalities": ["AUDIO"],
+            "speech_config": {
+                "voice_config": {
+                    "prebuilt_voice_config": {"voice_name": voice}
+                }
+            },
+        },
+    )
+
+    part      = response.candidates[0].content.parts[0]
+    raw_audio = base64.b64decode(part.inline_data.data)
+    mime      = part.inline_data.mime_type  # örn. "audio/pcm;rate=24000"
+
+    if "wav" in mime.lower():
+        return raw_audio
+
+    # PCM → WAV
+    rate_m = re.search(r"rate=(\d+)", mime)
+    sr     = int(rate_m.group(1)) if rate_m else 24000
+    buf    = io.BytesIO()
+    with wavemodule.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)   # 16-bit
+        wf.setframerate(sr)
+        wf.writeframes(raw_audio)
     return buf.getvalue()
 
 
 def make_music(tone: str, duration: int) -> bytes:
-    """Tone göre arka plan müziği üretir."""
+    """Tona göre arka plan müziği üretir (sine wave)."""
     sr    = 32000
     freqs = TONE_CHORDS.get(tone, TONE_CHORDS["kurumsal"])
     t     = np.linspace(0, duration, sr * duration)
     wave  = np.zeros_like(t)
-
     for i, f in enumerate(freqs):
         wave += (0.25 / (i + 1)) * np.sin(2 * np.pi * f * t + i * np.pi / 4)
         wave += 0.05 * np.sin(2 * np.pi * (f / 2) * t)
-
     fade = int(sr * 1.0)
     wave[:fade]  *= np.linspace(0, 1, fade)
     wave[-fade:] *= np.linspace(1, 0, fade)
-
     buf = io.BytesIO()
-    wav.write(buf, sr, (wave * 32767 * 0.7).astype(np.int16))
+    spwav.write(buf, sr, (wave * 32767 * 0.7).astype(np.int16))
     return buf.getvalue()
 
 
-def mix(voice: bytes, music: bytes, duck_ratio: float = 0.25) -> bytes:
-    """Ses + müzik birleştirir, konuşma anında müziği kısar (ducking)."""
+def mix_audio(voice: bytes, music: bytes, duck_ratio: float = 0.25) -> bytes:
+    """Ses + müzik birleştirir, ducking uygular."""
     def load(b):
-        sr, d = wav.read(io.BytesIO(b))
+        sr, d = spwav.read(io.BytesIO(b))
         return sr, d.astype(np.float32) / 32767
 
     vsr, v = load(voice)
@@ -164,9 +161,17 @@ def mix(voice: bytes, music: bytes, duck_ratio: float = 0.25) -> bytes:
             m[i:i+win] *= duck_ratio
 
     mixed = np.clip(v * 1.0 + m * 0.35, -1.0, 1.0)
-    buf = io.BytesIO()
-    wav.write(buf, vsr, (mixed * 32767 * 0.9).astype(np.int16))
+    buf   = io.BytesIO()
+    spwav.write(buf, vsr, (mixed * 32767 * 0.9).astype(np.int16))
     return buf.getvalue()
+
+
+def get_api_key() -> str | None:
+    """Streamlit secrets'ten Gemini API anahtarını alır."""
+    try:
+        return st.secrets["GEMINI_API_KEY"]
+    except (KeyError, FileNotFoundError):
+        return None
 
 
 # ── SAYFA ────────────────────────────────────────────────────────────────────
@@ -174,9 +179,22 @@ def mix(voice: bytes, music: bytes, duck_ratio: float = 0.25) -> bytes:
 st.markdown("""
 <div class="header">
   <h1>🎙️ Reklam Spotu Üreticisi</h1>
-  <p>Türkçe metninizi yazın — ses sentezi ve müzik mixini otomatik yapalım</p>
+  <p>Türkçe metninizi yazın — Gemini TTS ile seslendir, müzikle mixle</p>
 </div>
 """, unsafe_allow_html=True)
+
+# API anahtarı kontrolü
+api_key = get_api_key()
+if not api_key:
+    st.markdown("""
+<div class="api-box">
+<b>🔑 Gemini API Anahtarı Gerekli</b><br><br>
+Streamlit Cloud → <b>Manage app → Secrets</b> bölümüne şunu ekle:<br><br>
+<code>GEMINI_API_KEY = "AIza..."</code><br><br>
+API anahtarını <a href="https://aistudio.google.com/apikey" target="_blank">Google AI Studio</a>'dan ücretsiz alabilirsin.
+</div>
+""", unsafe_allow_html=True)
+    st.stop()
 
 # Metin girişi
 ad_text = st.text_area(
@@ -192,25 +210,28 @@ ad_text = st.text_area(
 
 # Canlı ton tespiti
 if ad_text.strip():
-    detected_tone, conf = detect_tone(ad_text)
+    tone_auto, conf = detect_tone(ad_text)
     words = len(ad_text.split())
-    est   = round(words * 0.45, 1)
     c1, c2, c3 = st.columns(3)
-    c1.metric("Tespit edilen ton", TONE_LABELS[detected_tone])
-    c2.metric("Tahmini süre", f"{est}s")
+    c1.metric("Tespit edilen ton", TONE_LABELS[tone_auto])
+    c2.metric("Tahmini süre", f"{round(words * 0.45, 1)}s")
     c3.metric("Kelime sayısı", words)
 
 st.markdown("---")
 
-# Ayarlar — gizlenmiş, opsiyonel
+# Gelişmiş ayarlar
 with st.expander("⚙️ Gelişmiş ayarlar", expanded=False):
     col1, col2 = st.columns(2)
     with col1:
         tone_override = st.selectbox(
-            "Müzik tonu (boş = otomatik)",
+            "Müzik tonu",
             ["Otomatik"] + list(TONE_LABELS.values()),
         )
-        speed = st.slider("Konuşma hızı", 0.7, 1.5, 1.0, 0.05)
+        gemini_voice = st.selectbox(
+            "Gemini ses",
+            GEMINI_VOICES,
+            help="Aoede: kadın, Charon: erkek, Fenrir: derin erkek, Kore: genç kadın, Puck: nötr",
+        )
     with col2:
         music_dur  = st.slider("Müzik süresi (sn)", 10, 60, 30, 5)
         duck_ratio = st.slider("Ducking oranı", 0.1, 0.6, 0.25, 0.05,
@@ -228,69 +249,66 @@ generate = st.button(
 
 if generate and ad_text.strip():
 
-    # Ton belirle
-    if tone_override == "Otomatik":
-        tone, _ = detect_tone(ad_text)
-    else:
-        # etiketten anahtara çevir
-        tone = next(k for k, v in TONE_LABELS.items() if v == tone_override)
+    tone = (
+        next(k for k, v in TONE_LABELS.items() if v == tone_override)
+        if tone_override != "Otomatik"
+        else tone_auto
+    )
 
     prog   = st.progress(0)
     status = st.empty()
 
-    status.info("**1/3** — Ses sentez ediliyor…")
-    time.sleep(0.6)
-    voice_bytes = make_voice(ad_text, tone, speed)
-    prog.progress(33)
+    try:
+        status.info("**1/3** — Gemini TTS ile ses üretiliyor…")
+        voice_bytes = make_voice_gemini(ad_text, api_key, gemini_voice)
+        prog.progress(40)
 
-    status.info(f"**2/3** — Müzik üretiliyor ({TONE_LABELS[tone]}, {music_dur}s)…")
-    time.sleep(0.8)
-    music_bytes = make_music(tone, music_dur)
-    prog.progress(66)
+        status.info(f"**2/3** — Müzik üretiliyor ({TONE_LABELS[tone]}, {music_dur}s)…")
+        music_bytes = make_music(tone, music_dur)
+        prog.progress(75)
 
-    status.info("**3/3** — Mix yapılıyor…")
-    time.sleep(0.5)
-    final_bytes = mix(voice_bytes, music_bytes, duck_ratio)
-    prog.progress(100)
-    status.success("✅ Reklam spotu hazır!")
+        status.info("**3/3** — Mix yapılıyor…")
+        final_bytes = mix_audio(voice_bytes, music_bytes, duck_ratio)
+        prog.progress(100)
+        status.success("✅ Reklam spotu hazır!")
+
+    except Exception as e:
+        prog.empty()
+        status.error(f"Hata: {e}")
+        st.stop()
 
     st.markdown("---")
-
-    # ── Sonuçlar ─────────────────────────────────────────────
     st.markdown("### 🎧 Sonuçlar")
 
     col_v, col_m, col_f = st.columns(3)
 
     with col_v:
-        st.markdown('<div class="result-label">Seslendirme</div>', unsafe_allow_html=True)
+        st.markdown('<div class="result-label">Seslendirme (Gemini)</div>', unsafe_allow_html=True)
         st.audio(voice_bytes, format="audio/wav")
-        st.download_button("⬇️ İndir", voice_bytes,
-                           f"seslendirme.wav", "audio/wav",
+        st.download_button("⬇️ İndir", voice_bytes, "seslendirme.wav", "audio/wav",
                            use_container_width=True)
 
     with col_m:
         st.markdown('<div class="result-label">Arka Plan Müziği</div>', unsafe_allow_html=True)
         st.audio(music_bytes, format="audio/wav")
-        st.download_button("⬇️ İndir", music_bytes,
-                           f"muzik.wav", "audio/wav",
+        st.download_button("⬇️ İndir", music_bytes, "muzik.wav", "audio/wav",
                            use_container_width=True)
 
     with col_f:
         st.markdown('<div class="result-label">Final Mix</div>', unsafe_allow_html=True)
         st.audio(final_bytes, format="audio/wav")
-        st.download_button("⬇️ İndir", final_bytes,
-                           "reklam_spotu.wav", "audio/wav",
+        st.download_button("⬇️ İndir", final_bytes, "reklam_spotu.wav", "audio/wav",
                            use_container_width=True, type="primary")
 
-    # Ton bilgisi
     st.markdown(
-        f"Kullanılan ton: <span class='tone-pill'>{TONE_LABELS[tone]}</span>",
+        f"Kullanılan ton: <span class='tone-pill'>{TONE_LABELS[tone]}</span> &nbsp;"
+        f"Ses: <span class='tone-pill'>{gemini_voice}</span>",
         unsafe_allow_html=True,
     )
 
 # ── FOOTER ────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div style="text-align:center;opacity:.4;font-size:.75rem;margin-top:3rem">
-Demo modu — Gerçek prodüksiyonda XTTS v2 + MusicGen çalışır
+Gemini 2.0 Flash TTS • Otomatik Müzik Mix
 </div>
 """, unsafe_allow_html=True)
