@@ -83,7 +83,7 @@ def detect_tone(text: str) -> tuple[str, int]:
 
 
 def make_voice_gemini(text: str, api_key: str, voice: str = "Aoede") -> bytes:
-    """Gemini 2.0 Flash TTS ile Türkçe ses üretir."""
+    """Gemini TTS ile Türkçe ses üretir."""
     import google.generativeai as genai
 
     genai.configure(api_key=api_key)
@@ -94,7 +94,7 @@ def make_voice_gemini(text: str, api_key: str, voice: str = "Aoede") -> bytes:
         f"{text}"
     )
 
-    response = genai.GenerativeModel("gemini-2.0-flash-exp").generate_content(
+    response = genai.GenerativeModel("gemini-2.5-flash-preview-tts").generate_content(
         contents=prompt,
         generation_config={
             "response_modalities": ["AUDIO"],
@@ -126,7 +126,7 @@ def make_voice_gemini(text: str, api_key: str, voice: str = "Aoede") -> bytes:
 
 
 def make_music(tone: str, duration: int) -> bytes:
-    """Tona göre arka plan müziği üretir (sine wave)."""
+    """Tona göre arka plan müziği üretir."""
     sr    = 32000
     freqs = TONE_CHORDS.get(tone, TONE_CHORDS["kurumsal"])
     t     = np.linspace(0, duration, sr * duration)
@@ -167,7 +167,6 @@ def mix_audio(voice: bytes, music: bytes, duck_ratio: float = 0.25) -> bytes:
 
 
 def get_api_key() -> str | None:
-    """Streamlit secrets'ten Gemini API anahtarını alır."""
     try:
         return st.secrets["GEMINI_API_KEY"]
     except (KeyError, FileNotFoundError):
@@ -183,20 +182,17 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# API anahtarı kontrolü
 api_key = get_api_key()
 if not api_key:
     st.markdown("""
 <div class="api-box">
 <b>🔑 Gemini API Anahtarı Gerekli</b><br><br>
 Streamlit Cloud → <b>Manage app → Secrets</b> bölümüne şunu ekle:<br><br>
-<code>GEMINI_API_KEY = "AIza..."</code><br><br>
-API anahtarını <a href="https://aistudio.google.com/apikey" target="_blank">Google AI Studio</a>'dan ücretsiz alabilirsin.
+<code>GEMINI_API_KEY = "AIza..."</code>
 </div>
 """, unsafe_allow_html=True)
     st.stop()
 
-# Metin girişi
 ad_text = st.text_area(
     "Reklam metni",
     placeholder=(
@@ -208,7 +204,6 @@ ad_text = st.text_area(
     label_visibility="collapsed",
 )
 
-# Canlı ton tespiti
 if ad_text.strip():
     tone_auto, conf = detect_tone(ad_text)
     words = len(ad_text.split())
@@ -219,7 +214,6 @@ if ad_text.strip():
 
 st.markdown("---")
 
-# Gelişmiş ayarlar
 with st.expander("⚙️ Gelişmiş ayarlar", expanded=False):
     col1, col2 = st.columns(2)
     with col1:
@@ -234,18 +228,14 @@ with st.expander("⚙️ Gelişmiş ayarlar", expanded=False):
         )
     with col2:
         music_dur  = st.slider("Müzik süresi (sn)", 10, 60, 30, 5)
-        duck_ratio = st.slider("Ducking oranı", 0.1, 0.6, 0.25, 0.05,
-                               help="Konuşma sırasında müzik ne kadar kısılsın")
+        duck_ratio = st.slider("Ducking oranı", 0.1, 0.6, 0.25, 0.05)
 
-# Üret butonu
 generate = st.button(
     "🎙️ Reklam Spotu Oluştur",
     type="primary",
     use_container_width=True,
     disabled=not ad_text.strip(),
 )
-
-# ── ÜRETİM ───────────────────────────────────────────────────────────────────
 
 if generate and ad_text.strip():
 
@@ -306,9 +296,8 @@ if generate and ad_text.strip():
         unsafe_allow_html=True,
     )
 
-# ── FOOTER ────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div style="text-align:center;opacity:.4;font-size:.75rem;margin-top:3rem">
-Gemini 2.0 Flash TTS • Otomatik Müzik Mix
+Gemini 2.5 Flash TTS • Otomatik Müzik Mix
 </div>
 """, unsafe_allow_html=True)
